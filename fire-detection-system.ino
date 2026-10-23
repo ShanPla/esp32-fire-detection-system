@@ -20,10 +20,10 @@
 
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <BlynkSimpleEsp32.h>
+#include <BlynkSimpleEsp32_SSL.h>   // encrypted connection on port 443
 #include <DHT.h>
 
-char ssid[] = "YOUR_WIFI_SSID";       // 2.4 GHz networks only
+char ssid[] = "YOUR_WIFI_SSID";
 char pass[] = "YOUR_WIFI_PASSWORD";
 
 /* ---------------- PINS ---------------- */
@@ -69,6 +69,7 @@ const unsigned long MQ2_FAULT_MS   = 5000;   // how long it must stay stuck
 const unsigned long T_SENSE = 400, T_CLIMATE = 2500, T_PUSH = 2000;
 const unsigned long T_HEALTH = 1000, T_RECONNECT = 15000;
 const unsigned long BUZZ_ON = 150, BUZZ_OFF = 400;
+const unsigned long T_PRINT = 2000;             // routine Serial line every 2 s
 const unsigned long CRITICAL_LOCKOUT = 60000;   // pause reconnects during a new alarm
 const unsigned long SIM_TIMEOUT_MS   = 300000;  // test mode switches off after 5 min
 
@@ -362,15 +363,24 @@ void taskSense() {
   soundVal = analogRead(SOUND_PIN);
   checkGasSensor(gasRaw);
 
-  if (spikeValue >= 0)  { gasVal = spikeValue; spikeValue = -1; }
+  bool injected = false;
+  if (spikeValue >= 0)  { gasVal = spikeValue; spikeValue = -1; injected = true; }
   else if (simActive)   gasVal = simGas;
   else                  gasVal = gasRaw;
 
+  Stage before = stage;
   updateStage();
   applyStageOutputs();
 
   if (stage == STAGE_CRITICAL) { if (!criticalSince) criticalSince = millis(); }
   else criticalSince = 0;
+
+  // Routine line every 2 s, but every sample while something is happening,
+  // so filter, fault and network messages don't scroll away.
+  static unsigned long lastPrint = 0;
+  bool busy = injected || upCount || downCount || stage != before;
+  if (!busy && millis() - lastPrint < T_PRINT) return;
+  lastPrint = millis();
 
   // Show progress toward a stage change, e.g. "(->ALERT 2/3)"
   char pending[24] = "";
@@ -378,7 +388,7 @@ void taskSense() {
   else if (downCount) snprintf(pending, sizeof pending, " (clear %d/%d)", downCount, CLEAR_SAMPLES);
 
   Serial.printf("Gas:%4d%s | Sound:%4d | Temp:%5.1fC | Hum:%5.1f%% | Stage:%s%s | Faults:%s | WiFi:%s Blynk:%s\n",
-                gasVal, simActive ? "(sim)" : "", soundVal, tempC, humidity,
+                gasVal, injected ? "(spike)" : simActive ? "(sim)" : "", soundVal, tempC, humidity,
                 STAGE_NAME[stage], pending,
                 faults == 0 ? "none" : faults == FAULT_DHT ? "DHT11" : faults == FAULT_MQ2 ? "MQ-2" : "DHT11+MQ-2",
                 WiFi.status() == WL_CONNECTED ? "up" : "down",
