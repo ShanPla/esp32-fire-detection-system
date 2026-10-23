@@ -99,6 +99,7 @@ struct LinkMonitor {
 };
 LinkMonitor wifiLink  = { "Wi-Fi", false, false, 0, 0, 0, 0 };
 LinkMonitor blynkLink = { "Blynk", false, false, 0, 0, 0, 0 };
+enum LinkChange { LINK_SAME, LINK_LOST, LINK_FIRST_UP, LINK_RESTORED };
 
 // Test mode
 bool simActive = false;
@@ -275,8 +276,6 @@ void sendFaultEvents() {
 /* =========================================================================
    ENHANCEMENT 02 - CONNECTION MONITORING
    ========================================================================= */
-enum LinkChange { LINK_SAME, LINK_LOST, LINK_FIRST_UP, LINK_RESTORED };
-
 LinkChange monitorLink(LinkMonitor &l, bool nowUp) {
   if (nowUp == l.up) return LINK_SAME;
   l.up = nowUp;
@@ -381,4 +380,146 @@ void taskSense() {
   Serial.printf("Gas:%4d%s | Sound:%4d | Temp:%5.1fC | Hum:%5.1f%% | Stage:%s%s | Faults:%s | WiFi:%s Blynk:%s\n",
                 gasVal, simActive ? "(sim)" : "", soundVal, tempC, humidity,
                 STAGE_NAME[stage], pending,
-                faults == 0 ? "none" : faults ==
+                faults == 0 ? "none" : faults == FAULT_DHT ? "DHT11" : faults == FAULT_MQ2 ? "MQ-2" : "DHT11+MQ-2",
+                WiFi.status() == WL_CONNECTED ? "up" : "down",
+                Blynk.connected() ? "up" : "down");
+}
+
+// Send-on-change telemetry, full resend every 60 s and on (re)connect.
+void pushTelemetry(bool force) {
+  if (!Blynk.connected()) return;
+  static int pGas = -1, pSound = -1, pStage = -1;
+  static float pTemp = -999, pHum = -999;
+  static unsigned long lastFull = 0;
+
+  bool full = force || millis() - lastFull > 60000;
+  if (full) lastFull = millis();
+
+  if (full || gasVal != pGas)       { Blynk.virtualWrite(VP_GAS, gasVal);         pGas = gasVal; }
+  if (full || soundVal != pSound)   { Blynk.virtualWrite(VP_SOUND, soundVal);     pSound = soundVal; }
+  if (full || (int)stage != pStage) { Blynk.virtualWrite(VP_STAGE, (int)stage);   pStage = stage; }
+  if (!isnan(tempC)    && (full || tempC != pTemp))   { Blynk.virtualWrite(VP_TEMP, tempC);   pTemp = tempC; }
+  if (!isnan(humidity) && (full || humidity != pHum)) { Blynk.virtualWrite(VP_HUM, humidity); pHum = humidity; }
+  pushStatus(full);
+}
+
+void taskPush() { pushTelemetry(false); }
+
+void taskHealth() {
+  // Wi-Fi just came back: reconnect Blynk now instead of waiting up to 15 s.
+  LinkChange w = monitorLink(wifiLink, WiFi.status() == WL_CONNECTED);
+  if ((w == LINK_RESTORED || w == LINK_FIRST_UP) && !Blynk.connected() && !alarmHasPriority())
+    tryBlynkConnect();
+
+  if (monitorLink(blynkLink, Blynk.connected()) == LINK_RESTORED) {
+    String msg = "Back online after ";
+    msg += blynkLink.lastOutageMs / 1000;
+    msg += " s offline (";
+    msg += blynkLink.attempts;
+    msg += " reconnect attempts)";
+    if (faults) msg += " - sensor fault active";
+    Blynk.logEvent("connection_restored", msg);
+  }
+
+  if (simActive && millis() - simStarted >= SIM_TIMEOUT_MS) {
+    startSimulation(0);
+    if (Blynk.connected()) Blynk.virtualWrite(VP_SIMGAS, 0);
+  }
+
+  sendFaultEvents();
+  pushStatus(false);
+}
+
+void taskReconnect() {
+  if (alarmHasPriority()) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiLink.attempts++;
+    blynkLink.attempts++;
+    Serial.printf("[NET] Wi-Fi reconnect attempt %lu\n", wifiLink.attempts);
+    WiFi.begin(ssid, pass);
+  } else if (!Blynk.connected()) {
+    tryBlynkConnect();
+  }
+}
+
+/* =========================================================================
+   BLYNK HANDLERS
+   ========================================================================= */
+BLYNK_WRITE(VP_MUTE) {
+  buzzerMuted = (param.asInt() == 1);
+  Serial.printf("Buzzer %s from app\n", buzzerMuted ? "MUTED" : "ARMED");
+}
+
+BLYNK_WRITE(VP_LAMPTEST) {   // same as midterm
+  if (param.asInt() != 1) return;
+  Serial.println("Lamp test requested from app");
+  for (int i = 0; i < 5; i++) { digitalWrite(leds[i], HIGH); delay(150); }
+  delay(300);
+  for (int i = 0; i < 5; i++) digitalWrite(leds[i], LOW);
+  tone(BUZZER, 2000); delay(100); noTone(BUZZER);
+  applyStageOutputs();
+}
+
+BLYNK_WRITE(VP_SIMGAS) {     // test gas slider, 0 = off
+  startSimulation(param.asInt());
+}
+
+BLYNK_CONNECTED() {
+  Blynk.syncVirtual(VP_MUTE);                        // restore mute after reboot
+  if (!simActive) Blynk.virtualWrite(VP_SIMGAS, 0);  // never resume a stale test
+  pushTelemetry(true);
+}
+
+/* =========================================================================
+   SETUP / LOOP
+   ========================================================================= */
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  pinMode(MQ2_PIN, INPUT);
+  pinMode(SOUND_PIN, INPUT);
+  pinMode(BUZZER, OUTPUT);
+  for (int i = 0; i < 5; i++) pinMode(leds[i], OUTPUT);
+  dht.begin();
+
+  Serial.println("\n--- System Initializing ---");
+
+  // Startup LED sweep and beep
+  for (int i = 0; i < 5; i++) { digitalWrite(leds[i], HIGH); delay(150); }
+  delay(300);
+  for (int i = 0; i < 5; i++) digitalWrite(leds[i], LOW);
+  tone(BUZZER, 2000); delay(100); noTone(BUZZER);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pass);
+  Serial.print("Connecting to Wi-Fi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) { delay(300); Serial.print("."); }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " connected" : " timed out");
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  if (WiFi.status() == WL_CONNECTED) Blynk.connect(3000);
+
+  taskClimate();   // first temperature reading before monitoring starts
+
+  timer.setInterval(T_SENSE,     taskSense);
+  timer.setInterval(T_CLIMATE,   taskClimate);
+  timer.setInterval(T_PUSH,      taskPush);
+  timer.setInterval(T_HEALTH,    taskHealth);
+  timer.setInterval(T_RECONNECT, taskReconnect);
+
+  Serial.println("--- Fire & Safety Monitoring Active ---");
+}
+
+void loop() {
+  // Run Blynk whenever Wi-Fi is up, so a login that is still in progress can
+  // finish. A new Critical alarm still takes priority while Blynk is down.
+  if (WiFi.status() != WL_CONNECTED) {
+    if (Blynk.connected()) Blynk.disconnect();   // Wi-Fi lost: mark Blynk down too
+  } else if (Blynk.connected() || !alarmHasPriority()) {
+    Blynk.run();
+  }
+  timer.run();
+  serviceSerial();
+  serviceBuzzer();
+}
