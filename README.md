@@ -78,6 +78,7 @@ Gas is sampled every 400 ms. Each sample averages 8 ADC reads to reduce noise.
 - **Critical has no delay.** One sample at or above the Critical threshold sounds the alarm immediately. The filter never delays the alarm.
 - **Stepping down** requires 5 consecutive samples (about 2 s) below a hysteresis band. To leave a stage, gas must fall 50 below its threshold, and temperature must fall 1 °C below 34 °C. This stops the LEDs and buzzer from flickering when a reading sits right at a threshold.
 - Every ignored transient is printed to the Serial Monitor as a `[FILTER]` message.
+- In normal operation the Serial Monitor prints one sensor line every 2 s. While a stage change is in progress, or after a spike, it prints every sample, so you can watch the filter count up.
 
 The Serial output shows each step as it happens:
 
@@ -170,7 +171,7 @@ Events triggered in test mode start with `[TEST]`, so they can't be mistaken for
 
 Test mode replaces the MQ-2 reading with a simulated value, so the detection logic can be demonstrated without a flame or real gas. It switches itself off after 5 minutes, so the device can't be left in simulation by accident. While active, the status text reads `TEST MODE`.
 
-Open the Serial Monitor at **115200 baud** with line ending set to **Newline**:
+Open the Serial Monitor at **115200 baud** with the line-ending dropdown set to **New Line**:
 
 | Command | Effect |
 |---|---|
@@ -179,6 +180,8 @@ Open the Serial Monitor at **115200 baud** with line ending set to **Newline**:
 | `spike 950` | Inject a single sample of 950 to show the transient filter |
 
 The **Test Gas slider (V8)** on the dashboard does the same as `sim`. Setting it to 0 turns test mode off.
+
+If typed commands do nothing, check the line-ending setting first. Without it, the sketch never sees the end of the command.
 
 ---
 
@@ -232,6 +235,7 @@ All tunable values are constants near the top of the sketch.
 | `MQ2_FAULT_MS` | 5000 ms | Time at a rail before an MQ-2 fault |
 | `SIM_TIMEOUT_MS` | 300000 ms | Test mode auto-off |
 | `T_SENSE` / `T_CLIMATE` / `T_RECONNECT` | 400 / 2500 / 15000 ms | Task intervals |
+| `T_PRINT` | 2000 ms | Routine Serial line interval |
 
 The thresholds were calibrated for our sensors and room. Re-check them if the environment changes. The MQ-2 also needs a few minutes of warm-up after power-on before its readings settle.
 
@@ -245,6 +249,7 @@ The thresholds were calibrated for our sensors and room. Re-check them if the en
   - `DHT sensor library` by Adafruit
   - `Adafruit Unified Sensor` (required by the DHT library)
 - `WiFi.h` and `WiFiClient.h` come with the ESP32 board package.
+- The sketch uses `BlynkSimpleEsp32_SSL.h`, so it connects to Blynk over an encrypted connection on port 443. Some networks, especially mobile hotspots, block or intercept Blynk's unencrypted port 80, so the device never connects.
 
 ## Project structure
 
